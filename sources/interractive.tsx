@@ -59,7 +59,11 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     `,
     examples: [
       [
-        `Open the upgrade window`,
+        `Open the upgrade window for all workspaces`,
+        `yarn upgrade-interactive-filter`,
+      ],
+      [
+        `Open the upgrade window for specific workspace`,
         `yarn upgrade-interactive-filter @yarnpkg/core`,
       ],
       [
@@ -118,13 +122,18 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     if (!workspace)
       throw new WorkspaceRequiredError(project.cwd, this.context.cwd);
 
-    let requiredWorkspaces: Set<IdentHash> = new Set(
-      this.workspaces.map((name) => {
-        const ident = structUtils.parseIdent(name);
-        project.getWorkspaceByIdent(ident);
-        return ident.identHash;
-      }),
-    );
+    let requiredWorkspaces: Set<IdentHash> | null = null;
+
+    // If specific workspaces are provided, filter by them. Otherwise, process all workspaces.
+    if (this.workspaces.length > 0) {
+      requiredWorkspaces = new Set(
+        this.workspaces.map((name) => {
+          const ident = structUtils.parseIdent(name);
+          project.getWorkspaceByIdent(ident);
+          return ident.identHash;
+        }),
+      );
+    }
 
     console.log('requiredWorkspaces', requiredWorkspaces);
 
@@ -521,7 +530,8 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
       for (const workspace of project.workspaces) {
         if (
           workspace.manifest.name?.identHash &&
-          requiredWorkspaces.has(workspace.manifest.name.identHash)
+          (requiredWorkspaces === null ||
+            requiredWorkspaces.has(workspace.manifest.name.identHash))
         ) {
           for (const dependencyType of [
             `dependencies`,
