@@ -73,7 +73,7 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     ],
   });
 
-  workspaces = Option.Rest();
+  workspaces = Option.Rest({ required: 0 });
 
   excludedDeps = Option.String(`--exclude`, {
     description: `A comma-separated list of dependencies to exclude from the upgrade (supports glob patterns like "@types/*" or "react-*")`,
