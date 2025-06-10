@@ -25,6 +25,18 @@ import * as t from 'typanion';
 const SIMPLE_SEMVER =
   /^((?:[\^~]|>=?)?)([0-9]+)(\.[0-9]+)(\.[0-9]+)((?:-\S+)?)$/;
 
+// Helper function to match glob patterns
+const matchesGlob = (str: string, pattern: string): boolean => {
+  // Escape special regex characters except * and ?
+  const escapedPattern = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+
+  const regex = new RegExp(`^${escapedPattern}$`);
+  return regex.test(str);
+};
+
 // eslint-disable-next-line @typescript-eslint/comma-dangle -- the trailing comma is required because of parsing ambiguities
 const partition = <T,>(array: Array<T>, size: number): Array<Array<T>> => {
   return array.length > 0
@@ -45,10 +57,28 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     details: `
       This command opens a fullscreen terminal interface where you can see any out of date packages used by your application, their status compared to the latest versions available on the remote registry, and select packages to upgrade.
     `,
-    examples: [[`Open the upgrade window`, `yarn upgrade-interactive-filter @yarnpkg/core`]],
+    examples: [
+      [
+        `Open the upgrade window`,
+        `yarn upgrade-interactive-filter @yarnpkg/core`,
+      ],
+      [
+        `Open the upgrade window excluding specific packages`,
+        `yarn upgrade-interactive-filter @yarnpkg/core --exclude react,typescript`,
+      ],
+      [
+        `Open the upgrade window excluding packages using glob patterns`,
+        `yarn upgrade-interactive-filter --exclude "@types/*,react-*"`,
+      ],
+    ],
   });
 
   workspaces = Option.Rest({ required: 1 });
+
+  excludedDeps = Option.String(`--exclude`, {
+    description: `A comma-separated list of dependencies to exclude from the upgrade (supports glob patterns like "@types/*" or "react-*")`,
+    validator: t.isOptional(t.isString()),
+  });
 
   async execute() {
     const { ItemOptions } = await import(
@@ -97,6 +127,23 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
     );
 
     console.log('requiredWorkspaces', requiredWorkspaces);
+
+    // Parse excluded dependencies (supports glob patterns)
+    const excludedPatterns: string[] = [];
+    if (this.excludedDeps) {
+      const excludedList = this.excludedDeps
+        .split(',')
+        .map((dep) => dep.trim())
+        .filter((dep) => dep.length > 0);
+      excludedPatterns.push(...excludedList);
+    }
+
+    // Helper function to check if a package should be excluded
+    const isPackageExcluded = (packageName: string): boolean => {
+      return excludedPatterns.some((pattern) =>
+        matchesGlob(packageName, pattern),
+      );
+    };
 
     await project.restoreInstallState({
       restoreResolutions: false,
@@ -482,10 +529,15 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
           ] as Array<HardDependencies>) {
             for (const descriptor of workspace.manifest[
               dependencyType
-            ].values())
+            ].values()) {
               if (project.tryWorkspaceByDescriptor(descriptor) === null) {
-                allDependencies.set(descriptor.descriptorHash, descriptor);
+                const packageName = structUtils.stringifyIdent(descriptor);
+                // Skip excluded dependencies
+                if (!isPackageExcluded(packageName)) {
+                  allDependencies.set(descriptor.descriptorHash, descriptor);
+                }
               }
+            }
           }
         }
       }
