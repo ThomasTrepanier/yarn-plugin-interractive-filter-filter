@@ -46,6 +46,70 @@ const partition = <T,>(array: Array<T>, size: number): Array<Array<T>> => {
 
 type UpgradeSuggestion = { value: string | null; label: string };
 type UpgradeSuggestions = Array<UpgradeSuggestion>;
+type ExcludedDependency = {
+  workspace: string | null;
+  directory: string | null;
+  dependencyPattern: string;
+  versionRange: string | null;
+};
+
+const formatInvalidDependency = (dep: string): string => {
+  return `Invalid dependency format: ${dep}. Expected format: [<location>#]<dependencyPattern>[@<version>]`;
+};
+
+const parseDependency = (
+  dep: string,
+): Pick<ExcludedDependency, 'dependencyPattern' | 'versionRange'> => {
+  const aliasParts = dep.split('@');
+
+  // If no alias is specified, we assume the whole string is the dependency pattern
+  if (aliasParts.length === 1) {
+    return {
+      dependencyPattern: aliasParts[0],
+      versionRange: null,
+    };
+  } else if (aliasParts.length === 2) {
+    if (!aliasParts[0]) {
+      // If the first part is empty, it means the dependency is specified with a version
+      return {
+        // Add back the @ to the scoped dependency
+        dependencyPattern: `@${aliasParts[1]}`,
+        versionRange: null,
+      };
+    }
+    // Otherwise, we assume the first part is the dependency pattern and the second part is the version
+    return {
+      dependencyPattern: aliasParts[0],
+      versionRange: aliasParts[1],
+    };
+  } else if (aliasParts.length === 3) {
+    // If we have 3 parts, it means we have a scoped dependency with a version
+    return {
+      dependencyPattern: `@${aliasParts[1]}`,
+      versionRange: aliasParts[2],
+    };
+  }
+  throw new UsageError(formatInvalidDependency(dep));
+};
+
+const parsePackageLocation = (
+  location: string,
+): Pick<ExcludedDependency, 'workspace' | 'directory'> => {
+  const hasAlias = location.indexOf(`@`) >= 0;
+
+  if (hasAlias) {
+    // If we have an alias, the location is a workspace
+    return {
+      workspace: location,
+      directory: null,
+    };
+  }
+  // Otherwise, we assume the location is a directory
+  return {
+    directory: location,
+    workspace: null,
+  };
+};
 
 // eslint-disable-next-line arca/no-default-export
 export default class UpgradeInteractiveCommand extends BaseCommand {
@@ -79,8 +143,8 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
 
   workspaces = Option.Rest({ required: 0 });
 
-  excludedDeps = Option.String(`--exclude`, {
-    description: `A comma-separated list of dependencies to exclude from the upgrade (supports glob patterns like "@types/*" or "react-*")`,
+  excludeArg = Option.String(`--exclude`, {
+    description: `A comma-separated list of dependencies to exclude from the upgrade (supports glob patterns like "@types/*" or "react-*"). You can specify the workspace and version like so: <workspace>#<package>@<version>`,
     validator: t.isOptional(t.isString()),
   });
 
@@ -117,6 +181,9 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
       configuration,
       this.context.cwd,
     );
+
+    console.log(workspace);
+
     const cache = await Cache.find(configuration);
 
     if (!workspace)
@@ -135,22 +202,50 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
       );
     }
 
-    console.log('requiredWorkspaces', requiredWorkspaces);
+    // console.log(requiredWorkspaces);
 
     // Parse excluded dependencies (supports glob patterns)
-    const excludedPatterns: string[] = [];
-    if (this.excludedDeps) {
-      const excludedList = this.excludedDeps
+    const excludeDeps: ExcludedDependency[] = [];
+    if (this.excludeArg) {
+      const excludedList = this.excludeArg
         .split(',')
         .map((dep) => dep.trim())
-        .filter((dep) => dep.length > 0);
-      excludedPatterns.push(...excludedList);
+        .filter((dep) => dep.length > 0)
+        .map((dep) => {
+          const sections = dep.split('#');
+
+          // If we have 1 part, it means only the dependency pattern is specified, no workspace
+          if (sections.length === 1) {
+            const parsedDep = parseDependency(sections[0]);
+            return {
+              workspace: null,
+              directory: null,
+              dependencyPattern: parsedDep.dependencyPattern,
+              versionRange: parsedDep.versionRange,
+            };
+          } else if (sections.length === 2) {
+            // If we have 2 sections, it means we have a workspace and a dependency pattern
+            const [locationPart, dependencyPart] = sections;
+            const parsedDep = parseDependency(dependencyPart);
+            const parsedLocation = parsePackageLocation(locationPart);
+
+            return {
+              workspace: parsedLocation.workspace || null,
+              directory: parsedLocation.directory || null,
+              dependencyPattern: parsedDep.dependencyPattern,
+              versionRange: parsedDep.versionRange,
+            };
+          }
+
+          throw new UsageError(formatInvalidDependency(dep));
+        });
+      excludeDeps.push(...excludedList);
     }
 
     // Helper function to check if a package should be excluded
     const isPackageExcluded = (packageName: string): boolean => {
-      return excludedPatterns.some((pattern) =>
-        matchesGlob(packageName, pattern),
+      return excludeDeps.some((pattern) =>
+        matchesGlob(packageName, pattern.dependencyPattern),
       );
     };
 
