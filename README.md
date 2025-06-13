@@ -52,7 +52,7 @@ yarn upgrade-interactive-filter --exclude react@npm:^18.0.0
 ```bash
 
 # Exclude packages from the list in every workspace
-yarn upgrade-interactive-filter --exclude react, typescript, @types/*
+yarn upgrade-interactive-filter --exclude react,typescript,@types/*
 
 # Exclude package install at specific version
 yarn upgrade-interactive-filter --exclude react@npm:^19.0.0

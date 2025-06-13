@@ -18,6 +18,7 @@ import type { SubmitInjectedComponent } from '@yarnpkg/libui/sources/misc/render
 import { suggestUtils } from '@yarnpkg/plugin-essentials';
 import { Command, Option, Usage, UsageError } from 'clipanion';
 import { diffWords } from 'diff';
+import path from 'path';
 import semver from 'semver';
 import { WriteStream } from 'tty';
 import * as t from 'typanion';
@@ -35,6 +36,49 @@ const matchesGlob = (str: string, pattern: string): boolean => {
 
   const regex = new RegExp(`^${escapedPattern}$`);
   return regex.test(str);
+};
+
+const matchesLocation = (
+  pattern: ExcludedDependency,
+  workspace: Workspace,
+): boolean => {
+  const parsedWorkspace = workspace.anchoredDescriptor.scope
+    ? `@${workspace.anchoredDescriptor.scope}/${workspace.anchoredDescriptor.name}`
+    : workspace.anchoredDescriptor.name;
+
+  if (pattern.workspace && pattern.workspace === parsedWorkspace) {
+    console.log(`Workspace: ${pattern.workspace}, ${parsedWorkspace}}`);
+    return true;
+  }
+  if (pattern.directory && pattern.directory === process.cwd()) {
+    console.log(`Directory: ${pattern.directory}, ${process.cwd()}`);
+    return true;
+  }
+
+  return false;
+};
+
+const matchesVersionRange = (
+  pattern: ExcludedDependency,
+  versionRange: string,
+): boolean => {
+  if (!pattern.versionRange) return true;
+
+  console.log(`Excluded version range: ${pattern.versionRange}`);
+  console.log(`Manifest Version Range: ${versionRange}`);
+
+  const isValid = semver.validRange(pattern.versionRange);
+  console.log(isValid);
+
+  const satisfies = semver.satisfies(versionRange, pattern.versionRange);
+  console.log(satisfies);
+  // If the version range is a valid semver, we can compare it directly
+  if (isValid) {
+    return satisfies;
+  }
+
+  // Otherwise, we assume it's a glob pattern and check if it matches
+  return matchesGlob(versionRange, pattern.versionRange);
 };
 
 // eslint-disable-next-line @typescript-eslint/comma-dangle -- the trailing comma is required because of parsing ambiguities
@@ -55,6 +99,35 @@ type ExcludedDependency = {
 
 const formatInvalidDependency = (dep: string): string => {
   return `Invalid dependency format: ${dep}. Expected format: [<location>#]<dependencyPattern>[@<version>]`;
+};
+
+const parseExcludedItem = (dep: string): ExcludedDependency => {
+  const sections = dep.split('#');
+
+  // If we have 1 part, it means only the dependency pattern is specified, no workspace
+  if (sections.length === 1) {
+    const parsedDep = parseDependency(sections[0]);
+    return {
+      workspace: null,
+      directory: null,
+      dependencyPattern: parsedDep.dependencyPattern,
+      versionRange: parsedDep.versionRange,
+    };
+  } else if (sections.length === 2) {
+    // If we have 2 sections, it means we have a workspace and a dependency pattern
+    const [locationPart, dependencyPart] = sections;
+    const parsedDep = parseDependency(dependencyPart);
+    const parsedLocation = parsePackageLocation(locationPart);
+
+    return {
+      workspace: parsedLocation.workspace || null,
+      directory: parsedLocation.directory || null,
+      dependencyPattern: parsedDep.dependencyPattern,
+      versionRange: parsedDep.versionRange,
+    };
+  }
+
+  throw new UsageError(formatInvalidDependency(dep));
 };
 
 const parseDependency = (
@@ -109,6 +182,22 @@ const parsePackageLocation = (
     directory: location,
     workspace: null,
   };
+};
+
+const formatVersionRange = (dep: ExcludedDependency): ExcludedDependency => {
+  if (!dep.versionRange) {
+    return dep;
+  }
+
+  if (dep.versionRange.startsWith('npm:')) {
+    // If the version range starts with "npm:", we assume it's a npm alias
+    return {
+      ...dep,
+      versionRange: dep.versionRange.slice(4), // Remove "npm:" prefix
+    };
+  }
+
+  return dep;
 };
 
 // eslint-disable-next-line arca/no-default-export
@@ -182,7 +271,7 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
       this.context.cwd,
     );
 
-    console.log(workspace);
+    // console.log(workspace);
 
     const cache = await Cache.find(configuration);
 
@@ -211,41 +300,24 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
         .split(',')
         .map((dep) => dep.trim())
         .filter((dep) => dep.length > 0)
-        .map((dep) => {
-          const sections = dep.split('#');
-
-          // If we have 1 part, it means only the dependency pattern is specified, no workspace
-          if (sections.length === 1) {
-            const parsedDep = parseDependency(sections[0]);
-            return {
-              workspace: null,
-              directory: null,
-              dependencyPattern: parsedDep.dependencyPattern,
-              versionRange: parsedDep.versionRange,
-            };
-          } else if (sections.length === 2) {
-            // If we have 2 sections, it means we have a workspace and a dependency pattern
-            const [locationPart, dependencyPart] = sections;
-            const parsedDep = parseDependency(dependencyPart);
-            const parsedLocation = parsePackageLocation(locationPart);
-
-            return {
-              workspace: parsedLocation.workspace || null,
-              directory: parsedLocation.directory || null,
-              dependencyPattern: parsedDep.dependencyPattern,
-              versionRange: parsedDep.versionRange,
-            };
-          }
-
-          throw new UsageError(formatInvalidDependency(dep));
-        });
+        .map(parseExcludedItem)
+        .map(formatVersionRange);
       excludeDeps.push(...excludedList);
     }
 
+    console.log(`Excluding dependencies:`, excludeDeps);
+
     // Helper function to check if a package should be excluded
-    const isPackageExcluded = (packageName: string): boolean => {
-      return excludeDeps.some((pattern) =>
-        matchesGlob(packageName, pattern.dependencyPattern),
+    const isPackageExcluded = (
+      packageName: string,
+      workspace: Workspace,
+      versionRange: string,
+    ): boolean => {
+      return excludeDeps.some(
+        (pattern) =>
+          matchesGlob(packageName, pattern.dependencyPattern) &&
+          matchesLocation(pattern, workspace) &&
+          matchesVersionRange(pattern, versionRange),
       );
     };
 
@@ -638,7 +710,9 @@ export default class UpgradeInteractiveCommand extends BaseCommand {
               if (project.tryWorkspaceByDescriptor(descriptor) === null) {
                 const packageName = structUtils.stringifyIdent(descriptor);
                 // Skip excluded dependencies
-                if (!isPackageExcluded(packageName)) {
+                if (
+                  !isPackageExcluded(packageName, workspace, descriptor.range)
+                ) {
                   allDependencies.set(descriptor.descriptorHash, descriptor);
                 }
               }
